@@ -29,23 +29,7 @@
 }
 
 + (BOOL)isCallbackURLSchemeValid:(NSString *)callbackURLScheme {
-    NSString *bundleID = [[self bundleId] lowercaseString];
-
-    if (bundleID && ![[callbackURLScheme lowercaseString] hasPrefix:bundleID]) {
-        PPSDKLog(@"callback URL scheme must start with %@ ", bundleID);
-        return NO;
-    }
-
-    // check the actual plist that the app is fully configured rather than just making canOpenURL call
-    NSArray *urlTypes = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleURLTypes"];
-    for (NSDictionary *item in urlTypes) {
-        NSArray *bundleURLSchemes = item[@"CFBundleURLSchemes"];
-        if (NSNotFound != [bundleURLSchemes indexOfObject:callbackURLScheme]) {
-            return YES;
-        }
-    }
-    PPSDKLog(@"callback URL scheme %@ is not found in .plist", callbackURLScheme);
-    return NO;
+    return (callbackURLScheme.length > 0);
 }
 
 + (BOOL)isAuthenticatorInstalledForTargetAppURLScheme:(NSString *)targetAppURLScheme {

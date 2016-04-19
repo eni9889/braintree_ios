@@ -17,6 +17,7 @@
 #endif
 #import <SafariServices/SafariServices.h>
 #import "BTConfiguration+PayPal.h"
+#import "KINWebBrowserViewController.h"
 
 NSString *const BTPayPalDriverErrorDomain = @"com.braintreepayments.BTPayPalDriverErrorDomain";
 
@@ -29,7 +30,7 @@ typedef NS_ENUM(NSUInteger, BTPayPalPaymentType) {
     BTPayPalPaymentTypeBillingAgreement,
 };
 
-@interface BTPayPalDriver () <SFSafariViewControllerDelegate>
+@interface BTPayPalDriver () <SFSafariViewControllerDelegate, KINWebBrowserDelegate>
 @end
 
 @implementation BTPayPalDriver
@@ -401,6 +402,7 @@ typedef NS_ENUM(NSUInteger, BTPayPalPaymentType) {
                            paymentType:(BTPayPalPaymentType)paymentType
                             completion:(void (^)(BTPayPalAccountNonce *, NSError *))completionBlock
 {
+    NSLog(@"%s: requestURL: %@", __func__, url);
     if (success) {
         // Defensive programming in case PayPal One Touch returns a non-HTTP URL so that SFSafariViewController doesn't crash
         if ([SFSafariViewController class] && ![url.scheme.lowercaseString hasPrefix:@"http"]) {
@@ -424,11 +426,39 @@ typedef NS_ENUM(NSUInteger, BTPayPalPaymentType) {
     }
 }
 
+- (void)webBrowser:(KINWebBrowserViewController *)webBrowser didStartLoadingURL:(NSURL *)URL {
+    NSLog(@"%s: %@ %@", __func__, webBrowser, URL);
+    //com.burbn.instagram.btpayments://onetouch/v1/success?token=EC-89W896410B4363843&ba_token=BA-2W376275RE4661636
+    NSString *btURLScheme = [NSString stringWithFormat:@"%@.btpayments", [[NSBundle mainBundle] bundleIdentifier]];
+    if ([[URL absoluteString] hasPrefix:btURLScheme]) {
+        NSLog(@"opening url: ");
+        [webBrowser dismissViewControllerAnimated:YES completion:^{
+            [BTAppSwitch handleOpenURL:URL sourceApplication:@"com.apple.mobilesafari"];
+        }];
+    }
+    
+}
+- (void)webBrowser:(KINWebBrowserViewController *)webBrowser didFinishLoadingURL:(NSURL *)URL {
+    NSLog(@"%s: %@ %@", __func__, webBrowser, URL);
+}
+- (void)webBrowser:(KINWebBrowserViewController *)webBrowser didFailToLoadURL:(NSURL *)URL withError:(NSError *)error {
+    NSLog(@"%s: %@ %@ %@", __func__, webBrowser, URL, error);
+}
+
 - (void)performSwitchRequest:(NSURL *)appSwitchURL {
-    if ([SFSafariViewController class]) {
-        [self informDelegatePresentingViewControllerRequestPresent:appSwitchURL];
+    
+    if (self.viewControllerPresentingDelegate != nil && [self.viewControllerPresentingDelegate respondsToSelector:@selector(paymentDriver:requestsPresentationOfViewController:)]) {
+        
+        UINavigationController *webBrowserNavigationController = [KINWebBrowserViewController navigationControllerWithWebBrowser];
+        
+        [self.viewControllerPresentingDelegate paymentDriver:self requestsPresentationOfViewController:webBrowserNavigationController];
+        
+        KINWebBrowserViewController *webBrowser = [webBrowserNavigationController rootWebBrowser];
+        webBrowser.delegate = self;
+        [webBrowser loadURLString:[appSwitchURL absoluteString]];
+        
     } else {
-        [[UIApplication sharedApplication] openURL:appSwitchURL];
+        [[BTLogger sharedLogger] critical:@"Unable to display View Controller to continue PayPal flow. BTPayPalDriver needs a viewControllerPresentingDelegate<BTViewControllerPresentingDelegate> to be set."];
     }
 }
 
@@ -587,9 +617,16 @@ typedef NS_ENUM(NSUInteger, BTPayPalPaymentType) {
 
 - (void)informDelegatePresentingViewControllerRequestPresent:(NSURL*) appSwitchURL {
     if (self.viewControllerPresentingDelegate != nil && [self.viewControllerPresentingDelegate respondsToSelector:@selector(paymentDriver:requestsPresentationOfViewController:)]) {
-        self.safariViewController = [[SFSafariViewController alloc] initWithURL:appSwitchURL];
-        self.safariViewController.delegate = self;
-        [self.viewControllerPresentingDelegate paymentDriver:self requestsPresentationOfViewController:self.safariViewController];
+        
+        UINavigationController *webBrowserNavigationController = [KINWebBrowserViewController navigationControllerWithWebBrowser];
+        
+        [self.viewControllerPresentingDelegate paymentDriver:self requestsPresentationOfViewController:webBrowserNavigationController];
+        
+        KINWebBrowserViewController *webBrowser = [webBrowserNavigationController rootWebBrowser];
+        webBrowser.delegate = self;
+        webBrowser.actionButtonHidden = YES;
+        [webBrowser loadURLString:[appSwitchURL absoluteString]];
+        
     } else {
         [[BTLogger sharedLogger] critical:@"Unable to display View Controller to continue PayPal flow. BTPayPalDriver needs a viewControllerPresentingDelegate<BTViewControllerPresentingDelegate> to be set."];
     }
@@ -615,46 +652,8 @@ static NSString * const SFSafariViewControllerFinishedURL = @"sfsafariviewcontro
 #pragma mark - Preflight check
 
 - (BOOL)verifyAppSwitchWithRemoteConfiguration:(BTJSON *)configuration error:(NSError * __autoreleasing *)error {
-    if (![configuration[@"paypalEnabled"] isTrue]) {
-        [self.apiClient sendAnalyticsEvent:@"ios.paypal-otc.preflight.disabled"];
-        if (error != NULL) {
-            *error = [NSError errorWithDomain:BTPayPalDriverErrorDomain
-                                         code:BTPayPalDriverErrorTypeDisabled
-                                     userInfo:@{ NSLocalizedDescriptionKey: @"PayPal is not enabled for this merchant",
-                                                 NSLocalizedRecoverySuggestionErrorKey: @"Enable PayPal for this merchant in the Braintree Control Panel" }];
-        }
-        return NO;
-    }
-    
-    if (self.returnURLScheme == nil || [self.returnURLScheme isEqualToString:@""]) {
-        NSString *recoverySuggestion = @"PayPal requires a return URL scheme to be configured via [BTAppSwitch setReturnURLScheme:]. This custom URL scheme must also be registered with your app.";
-        [[BTLogger sharedLogger] critical:recoverySuggestion];
-
-        [self.apiClient sendAnalyticsEvent:@"ios.paypal-otc.preflight.nil-return-url-scheme"];
-        if (error != NULL) {
-            *error = [NSError errorWithDomain:BTPayPalDriverErrorDomain
-                                         code:BTPayPalDriverErrorTypeIntegrationReturnURLScheme
-                                     userInfo:@{ NSLocalizedDescriptionKey: @"PayPal app switch is missing a returnURLScheme",
-                                                 NSLocalizedRecoverySuggestionErrorKey: recoverySuggestion }];
-        }
-        return NO;
-    }
-    
-    if (![[self.class payPalClass] doesApplicationSupportOneTouchCallbackURLScheme:self.returnURLScheme]) {
-        NSString *recoverySuggestion = [NSString stringWithFormat:@"PayPal requires [BTAppSwitch setReturnURLScheme:] to be configured to begin with your app's bundle ID (%@). Currently, it is set to (%@).", [NSBundle mainBundle].bundleIdentifier, self.returnURLScheme];
-        [[BTLogger sharedLogger] critical:recoverySuggestion];
-        
-        [self.apiClient sendAnalyticsEvent:@"ios.paypal-otc.preflight.invalid-return-url-scheme"];
-        if (error != NULL) {
-            *error = [NSError errorWithDomain:BTPayPalDriverErrorDomain
-                                         code:BTPayPalDriverErrorTypeIntegrationReturnURLScheme
-                                     userInfo:@{NSLocalizedFailureReasonErrorKey: @"Application does not support One Touch callback URL scheme",
-                                                NSLocalizedRecoverySuggestionErrorKey: recoverySuggestion }];
-        }
-        return NO;
-    }
-    
-    return YES;
+    *error = nil;
+    return [configuration[@"paypalEnabled"] isTrue];
 }
 
 #pragma mark - Analytics Helpers
@@ -735,7 +734,7 @@ static NSString * const SFSafariViewControllerFinishedURL = @"sfsafariviewcontro
 #pragma mark - App Switch handling
 
 - (BOOL)isiOSAppAvailableForAppSwitch {
-    return [[self.class payPalClass] isWalletAppInstalled];
+    return NO;
 }
 
 + (BOOL)canHandleAppSwitchReturnURL:(NSURL *)url sourceApplication:(NSString *)sourceApplication {
